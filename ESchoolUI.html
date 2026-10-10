@@ -1,0 +1,158 @@
+<script>
+let esInfo=null,esSnapshot=null,esBusy=false;
+const esLabels={eschoolLogin:'Вход в eSchool…',eschoolInfo:'Проверка сессии…',eschoolPeriods:'Загрузка периодов…',eschoolRead:'Загрузка из eSchool…',eschoolLogout:'Выход…'};
+async function esRpc(method,input){
+  if(DEMO){
+    if(!/^https?:$/.test(location.protocol)||location.port!=='8876')throw Error('Вход доступен в опубликованном Apps Script. Автономный демофайл не подключается к eSchool.');
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),180000);
+    try{const response=await fetch('/api/'+method,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input||{}),signal:controller.signal});const result=await response.json();if(!result.ok)throw Error(result.error);return result.value;}finally{clearTimeout(timer);}
+  }
+  return new Promise((resolve,reject)=>{let settled=false;const timer=setTimeout(()=>{settled=true;reject(Error('eSchool не ответил вовремя.'));},180000);const finish=(fn,value)=>{if(!settled){settled=true;clearTimeout(timer);fn(value);}};const r=google.script.run.withSuccessHandler(value=>finish(resolve,value)).withFailureHandler(e=>finish(reject,Error(e.message||'Нет связи с сервером.')));if(method==='eschoolLogin')r.eschoolLogin(input);else if(method==='eschoolInfo')r.eschoolInfo();else if(method==='eschoolPeriods')r.eschoolPeriods(input);else if(method==='eschoolRead')r.eschoolRead(input);else if(method==='eschoolLogout')r.eschoolLogout();else finish(reject,Error('Неизвестный запрос.'));});
+}
+async function esRun(method,input,then){if(esBusy||esAuto.running)return;esBusy=true;const status=$('esStatus');if(status){status.textContent=esLabels[method]||'Сохраняем…';status.style.color='var(--muted)';}document.querySelectorAll('[data-es],#esYear,#esPeriod').forEach(b=>b.disabled=true);try{await then(await esRpc(method,input));}catch(error){if($('esStatus')){$('esStatus').textContent=error.message;$('esStatus').style.color='var(--danger)';}}finally{esBusy=false;document.querySelectorAll('[data-es],#esYear,#esPeriod').forEach(b=>b.disabled=false);esAutoUi();}}
+function esBody(){
+ if(!esInfo?.connected)return `<p class="hint">Введи данные от app.eschool.center. Вход запомнится на сервере твоего личного приложения. Для восстановления сессии сохраняются логин и SHA-256 пароля; сам пароль не сохраняется. «Выйти» удаляет данные входа.</p>${field('Логин eSchool','esUsername','','text','autocomplete="username" maxlength="200"')}${field('Пароль eSchool','esPassword','','password','autocomplete="current-password" maxlength="500"')}<p id="esStatus" class="hint" role="status" style="margin:14px 0"></p><button type="button" class="button wide" data-es="login">Войти в eSchool</button><p class="hint" style="margin-top:12px">Доступ для аккаунта ученика. Двухфакторный вход и ЕСИА пока не поддерживаются.</p>`;
+ return `<div class="warning-panel">Аккаунт подключён. ${esInfo.remembered?'Вход запомнен.':'Текущая сессия сохранена. Для автоматического восстановления войди ещё раз.'} Оценки текущего учебного года и задания обновляются автоматически, если это включено в настройках.</div><p class="hint" data-es-auto-status role="status" style="margin:12px 0">${esc(esAuto.message)}</p><button type="button" class="button secondary wide" data-es="sync">Обновить всё сейчас</button><div class="field"><label class="label" for="esYear">Учебный год eSchool</label><select id="esYear">${esInfo.years.map(y=>`<option value="${esc(y.yearId)}" ${String(y.yearId)===String(esInfo.currentYearId)?'selected':''}>${esc(y.name)}</option>`).join('')}</select></div><div class="field"><label class="label" for="esPeriod">Период eSchool</label><select id="esPeriod"><option value="">Загружаем периоды…</option></select></div><p id="esStatus" class="hint" role="status" style="margin:14px 0"></p><button type="button" class="button wide" data-es="read">Загрузить оценки</button><div class="line" style="margin:20px 0"></div>${field('Расписание и задания на 7 дней начиная с','esTaskDate',taskDate,'date')}<button type="button" class="button secondary wide" data-es="homework" style="margin-top:12px">Загрузить задания</button><div id="esPreview"></div>${!esInfo.remembered?'<button type="button" class="text-btn" data-es="relogin" style="margin-top:15px">Запомнить вход</button>':''}<button type="button" class="text-btn" data-es="logout" style="margin-top:15px">Выйти из eSchool</button>`;
+}
+function esShow(){openEditor({kind:'eschool'},'eSchool',esBody(),'<button type="button" class="button secondary wide" data-action="close-editor">Закрыть</button>');}
+async function esPeriods(){if(!$('esYear'))return;const periods=await esRpc('eschoolPeriods',{yearId:$('esYear').value});$('esPeriod').innerHTML=periods.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');$('esStatus').textContent=periods.length?'Выбери период для импорта.':'Для этого года нет доступных периодов.';}
+function openESchool(){if(esAuto.running){toast('eSchool обновляется. Дождись завершения.');return;}esShow();esRun('eschoolInfo',{},async info=>{esInfo=info;esShow();if(info.connected)await esPeriods();});}
+document.addEventListener('click',async event=>{
+ const b=event.target.closest('[data-es]');if(!b||b.disabled||esBusy||esAuto.running)return;
+ if(b.dataset.es==='sync'){await esAutoRefresh(true);return;}
+ if(b.dataset.es==='relogin'){esInfo=null;esShow();return;}
+ if(b.dataset.es==='login'){const input={username:$('esUsername').value,password:$('esPassword').value};await esRun('eschoolLogin',input,async info=>{esInfo=info;esShow();await esPeriods();});input.password='';if(esInfo?.connected)esAutoRestart();}
+ if(b.dataset.es==='read'){if(!$('esPeriod').value)return;await esRun('eschoolRead',{periodId:$('esPeriod').value,yearId:$('esYear').value},async result=>{esSnapshot=result;$('esStatus').textContent=`Получено: ${result.subjects.length} предметов, ${result.grades.length} оценок.`;$('esPreview').innerHTML=`<div style="margin:15px 0">${result.subjects.map(s=>`<div class="operation row between"><strong>${esc(s.name)}</strong><span>${number(Core.average(result.grades.filter(g=>g.subjectId===s.id),settings()))}</span></div>`).join('')}</div>${result.warnings.map(w=>`<p class="hint">${esc(w)}</p>`).join('')}<button type="button" class="button wide" data-es="import">Сохранить в мой дневник</button><p class="hint">Повторный импорт обновляет совпадающие оценки. Оценки, удалённые в eSchool, автоматически не удаляются.</p>`;});}
+ if(b.dataset.es==='homework'){await esRun('eschoolRead',{kind:'homework',date:$('esTaskDate').value},async result=>{esSnapshot=result;$('esStatus').textContent=`Получено заданий: ${result.tasks.length}.`;$('esPreview').innerHTML=`<div style="margin:15px 0">${result.tasks.map(t=>`<div class="operation"><strong>${esc(t.subject)}</strong><p>${dateLabel(t.date)} · ${esc(t.text.slice(0,100))}</p></div>`).join('')}</div><button type="button" class="button wide" data-es="import">Сохранить задания</button>`;});}
+ if(b.dataset.es==='logout'){await esRun('eschoolLogout',{},async info=>{esInfo=info;esSnapshot=null;esAuto.blocked=true;esAuto.last=0;remove(key+':esLastSync');esAutoStatus('Вход удалён. Подключи eSchool для обновления.');esShow();});}
+ if(b.dataset.es==='import'&&esSnapshot){
+   if(busy||pending||!connected)return;esBusy=true;b.disabled=true;const snapshot=esSnapshot;
+   try{await esImportSnapshot(snapshot);esSnapshot=null;detail=false;setScreen(snapshot.schedules?.length?'schedule':snapshot.tasks?.length?'tasks':'marks');toast('Данные eSchool сохранены');}catch(error){notify(error.message);}finally{esBusy=false;}
+ }
+});
+document.addEventListener('change',async e=>{if(e.target.id==='esYear'&&!esBusy&&!esAuto.running){esBusy=true;try{await esPeriods();}catch(error){$('esStatus').textContent=error.message;}finally{esBusy=false;}}});
+
+const esAuto={running:false,next:0,blocked:false,failures:0,last:read(key+':esLastSync',0),message:'Подключи eSchool для обновления.',warning:false};
+function esAutoPanel(){return `<label class="setting switch-row"><div class="grow"><span class="setting-title">Обновлять автоматически</span><p>При открытии и каждые 5 минут: оценки за текущий учебный год, задания на эту и следующую неделю.</p></div><input type="checkbox" id="esAutoSync" ${settings().esAutoSync?'checked':''}></label><div class="setting"><p class="hint" data-es-auto-status role="status">${esc(settings().esAutoSync?esAuto.message:'Автообновление выключено.')}</p><button type="button" class="text-btn" data-es="sync" ${esAuto.running?'disabled':''}>Обновить всё сейчас</button><p class="hint">Обновление работает, пока приложение открыто. При возвращении проверит пропущенное.</p></div>`;}
+function esAutoUi(){
+ const scheduleStatus=$('scheduleSyncStatus');if(scheduleStatus){scheduleStatus.textContent=esAuto.message;scheduleStatus.hidden=!esAuto.running&&!esAuto.warning;scheduleStatus.style.color=esAuto.warning?'var(--danger)':'var(--muted)';}
+ const emptyTitle=document.querySelector('[data-schedule-empty-title]');if(emptyTitle)emptyTitle.textContent=esAuto.running?'Загружаем расписание…':'Расписание ещё не загружено';
+ document.querySelectorAll('[data-es-auto-status]').forEach(el=>{el.textContent=!settings().esAutoSync&&!esAuto.running?'Автообновление выключено.':esAuto.message;el.style.color=esAuto.warning?'var(--danger)':'var(--muted)';});
+ document.querySelectorAll('[data-es],#esYear,#esPeriod,#esTaskDate').forEach(el=>el.disabled=esBusy||esAuto.running);
+}
+function esAutoStatus(message,warning=false){esAuto.message=message;esAuto.warning=warning;esAutoUi();}
+function esAutoRestart(){esAuto.blocked=false;esAuto.next=0;esAuto.failures=0;esAutoUi();setTimeout(()=>esAutoRefresh(),100);}
+function esEditing(){return $('confirmDialog').open||$('editor').open&&editContext?.kind!=='eschool'||!!document.activeElement?.matches('textarea,input:not([type="checkbox"]),select,[contenteditable="true"]');}
+function esChanges(snapshot,current){
+ const changed=(items,existing,fields)=>{const byId=new Map(existing.map(x=>[x.id,x]));return (items||[]).filter(item=>{const old=byId.get(item.id);return !old||fields.some(field=>JSON.stringify(old[field]??(field==='files'?[]:''))!==JSON.stringify(item[field]??(field==='files'?[]:'')));});};
+ return {subjects:changed(snapshot.subjects,current.subjects,['name']),grades:changed(snapshot.grades,current.grades,['subjectId','value','modifier','weight','date','note','lessonId']),tasks:changed(snapshot.tasks,current.tasks||[],['subject','text','html','date','remotePartId','attachments','lessonId','files'])};
+}
+function esWeekDates(today){const day=new Date(today+'T12:00:00Z');day.setUTCDate(day.getUTCDate()-(day.getUTCDay()+6)%7);const first=day.toISOString().slice(0,10);day.setUTCDate(day.getUTCDate()+7);return [first,day.toISOString().slice(0,10)];}
+function esFullYear(periods){return periods.slice().sort((a,b)=>(Date.parse(b.end)-Date.parse(b.start))-(Date.parse(a.end)-Date.parse(a.start)))[0];}
+function esScheduleChanged(snapshot){
+ const r=snapshot.range,known=state.scheduleRanges.some(x=>x.sourceKey===r.sourceKey&&x.start===r.start&&x.end===r.end);
+ const plain=items=>items.map(l=>({id:l.id,subjectId:l.subjectId,subject:l.subject,date:l.date,number:l.number,room:l.room,taskIds:l.taskIds,startTime:l.startTime||'',endTime:l.endTime||'',timeZone:l.timeZone||''})).sort((a,b)=>a.id.localeCompare(b.id));
+ return !known||JSON.stringify(plain(snapshot.lessons))!==JSON.stringify(plain(state.lessons.filter(l=>l.sourceKey===r.sourceKey&&l.date>=r.start&&l.date<=r.end)));
+}
+async function esImportSnapshot(snapshot,options={}){
+ const delta=esChanges(snapshot,state), changedSchedules=(snapshot.schedules||[]).filter(esScheduleChanged);
+ const commit=async event=>{if(options.canContinue&&!options.canContinue())throw Error('ES_SYNC_DEFERRED');if(!await save(event,options))throw Error('Импорт приостановлен. Проверь связь и неподтверждённую запись.');};
+ // Save dependencies first, and keep every journal row within the Sheets cell limit.
+ for(const [kind,limit] of [['subjects',100],['grades',50],['tasks',2]]){
+   let event={type:'eschool.import',id:uid(),subjects:[],grades:[],tasks:[]};
+   for(const item of delta[kind]){
+     const candidate={...event,[kind]:[...event[kind],item]};
+     if(event[kind].length&&(event[kind].length>=limit||JSON.stringify(candidate).length>43000)){await commit(event);event={type:'eschool.import',id:uid(),subjects:[],grades:[],tasks:[]};}
+     event[kind].push(item);
+   }
+   if(event[kind].length)await commit(event);
+ }
+ for(const schedule of changedSchedules)await commit({type:'schedule.replace',id:uid(),range:schedule.range,lessons:schedule.lessons});
+ return {subjects:delta.subjects.length,grades:delta.grades.length,tasks:delta.tasks.length,lessons:changedSchedules.reduce((n,s)=>n+s.lessons.length,0)};
+}
+let esScheduleWanted=null;
+function esScheduleRequest(date){if(scheduleKnown(date))return;esScheduleWanted=date;esLoadSchedule();}
+async function esLoadSchedule(){
+ if(!esScheduleWanted||esAuto.running||esBusy||busy||pending||!loaded||!connected||navigator.onLine===false||document.visibilityState!=='visible'||esEditing())return;
+ if(DEMO&&(!/^https?:$/.test(location.protocol)||location.port!=='8876'))return;
+ const date=esScheduleWanted;esScheduleWanted=null;if(scheduleKnown(date))return;
+ esAuto.running=true;esAutoStatus('Загружаем выбранную неделю…');if(screen==='schedule')render();
+ const canContinue=()=>!pending&&!busy&&connected&&!esEditing()&&document.visibilityState==='visible';
+ try{
+   esInfo=await esRpc('eschoolInfo',{});if(!esInfo.connected){esAutoStatus('Подключи eSchool в настройках.');return;}
+   const snapshot=await esRpc('eschoolRead',{kind:'homework',date:esWeekDates(date)[0]});
+   if(!canContinue())throw Error('ES_SYNC_DEFERRED');await load({quiet:true});
+   await esImportSnapshot(snapshot,{quiet:true,canContinue});esAutoStatus('Выбранная неделя загружена.');
+ }catch(error){if(error.message==='ES_SYNC_DEFERRED'){esScheduleWanted=esScheduleWanted||date;}else esAutoStatus('Не удалось загрузить неделю: '+error.message,true);}
+ finally{esAuto.running=false;esAutoUi();if(screen==='schedule')render();if(esScheduleWanted&&esScheduleWanted!==date)setTimeout(()=>esLoadSchedule(),200);}
+}
+async function esAutoRefresh(force=false){
+ if(esAuto.running||esBusy||busy||pending||!loaded||navigator.onLine===false||document.visibilityState!=='visible'||esEditing())return;
+ if(DEMO&&(!/^https?:$/.test(location.protocol)||location.port!=='8876'))return;
+ if(!force&&(!settings().esAutoSync||esAuto.blocked||Date.now()<esAuto.next))return;
+ esAuto.running=true;esAuto.next=Date.now()+300000;esAutoStatus('Обновляем eSchool…');
+ const canContinue=()=>!pending&&!busy&&connected&&!esEditing()&&document.visibilityState==='visible'&&(force||settings().esAutoSync);
+ try{
+   if(!connected)await load();if(!connected||pending)return;
+   esInfo=await esRpc('eschoolInfo',{});
+   if(!esInfo.connected){esAuto.blocked=true;esAutoStatus('Войди в eSchool в настройках. Вход запомнится.');return;}
+   const periods=await esRpc('eschoolPeriods',{yearId:esInfo.currentYearId}),period=esFullYear(periods);
+   if(!period)throw Error('eSchool не вернул периоды текущего учебного года.');
+   const snapshot=await esRpc('eschoolRead',{periodId:period.id,yearId:esInfo.currentYearId});snapshot.tasks=[];snapshot.schedules=[];
+   const weeks=[...new Set([...esWeekDates(Core.today()),...(screen==='schedule'?[esWeekDates(scheduleDate)[0]]:[])])];
+   for(const date of weeks){
+     if(!canContinue())throw Error('ES_SYNC_DEFERRED');
+     esAutoStatus('Оценки загружены. Обновляем расписание и задания…');
+     const part=await esRpc('eschoolRead',{kind:'homework',date});
+     snapshot.tasks.push(...part.tasks);snapshot.schedules.push(...(part.schedules||[]));snapshot.warnings.push(...(part.warnings||[]));
+   }
+   if(!canContinue())throw Error('ES_SYNC_DEFERRED');
+   await load({quiet:true});if(!canContinue())throw Error('ES_SYNC_DEFERRED');
+   esAutoStatus('Сохраняем обновления…');
+   const changed=await esImportSnapshot(snapshot,{quiet:true,canContinue});
+   esAuto.last=Date.now();esAuto.failures=0;esAuto.blocked=false;esAuto.next=Date.now()+300000;write(key+':esLastSync',esAuto.last);
+   const time=new Date(esAuto.last).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+   esAutoStatus(`Обновлено в ${time}. ${changed.grades+changed.tasks+changed.subjects+changed.lessons?`Оценок: ${changed.grades}, заданий: ${changed.tasks}.`:'Данные актуальны.'}${snapshot.warnings.length?' Есть пропущенные записи: проверь ручной импорт.':''}`,snapshot.warnings.length>0);
+ }catch(error){
+   if(error.message==='ES_SYNC_DEFERRED'){esAuto.next=Date.now()+15000;esAutoStatus('Продолжим обновление после редактирования.');return;}
+   esAuto.failures++;esAuto.next=Date.now()+Math.min(900000,60000*2**Math.min(esAuto.failures-1,4));
+   esAuto.blocked=/повторный вход|Войди|Сессия завершена/.test(error.message);
+   esAutoStatus(esAuto.blocked?'Нужен вход в eSchool: открой его в настройках.':`Не удалось обновить: ${error.message} Повторим автоматически.`,true);
+ }finally{esAuto.running=false;esAutoUi();}
+}
+
+function esSafeHtml(html){
+ const doc=new DOMParser().parseFromString(String(html),'text/html'),allowed=new Set(['P','BR','B','STRONG','I','EM','U','S','UL','OL','LI','TABLE','THEAD','TBODY','TR','TH','TD','SUP','SUB','BLOCKQUOTE','H1','H2','H3']);
+ function walk(node){if(node.nodeType===3)return esc(node.textContent);if(node.nodeType!==1)return '';if(['SCRIPT','STYLE','IFRAME','OBJECT','EMBED','SVG','MATH','FORM','INPUT','BUTTON'].includes(node.tagName))return '';const content=Array.from(node.childNodes).map(walk).join('');if(node.tagName==='A'){try{const u=new URL(node.getAttribute('href'),'https:\/\/app.eschool.center');if(u.protocol==='https:')return `<a href="${esc(u.href)}" target="_blank" rel="noopener noreferrer">${content}</a>`;}catch{}return content;}if(!allowed.has(node.tagName))return content;const tag=node.tagName.toLowerCase();return tag==='br'?'<br>':`<${tag}>${content}</${tag}>`;}
+ return Array.from(doc.body.childNodes).map(walk).join('');
+}
+function taskFilesHTML(t){return (t.files||[]).length?`<div class="task-files" aria-label="Прикреплённые файлы">${t.files.map(f=>`<button type="button" class="attachment" data-download-task="${esc(t.id)}" data-file-id="${esc(f.id)}" aria-label="Скачать ${esc(f.name)}"><span aria-hidden="true">↓</span><span class="grow"><strong>${esc(f.name)}</strong><small>${f.size?number(f.size/1048576)+' МБ · ':''}Скачать</small></span></button>`).join('')}</div>`:'';}
+async function openRemoteTask(t){
+ openEditor({kind:'remote-task',task:t},t.subject,`<p class="hint">${dateLabel(t.date)} · eSchool</p><div class="remote-task">${esSafeHtml(t.html||esc(t.text))}</div><div id="remoteFiles">${taskFilesHTML(t)}</div><p id="remoteFileStatus" class="file-status" role="status">Обновляем вложения…</p>`,'<button type="button" class="button wide" data-action="close-editor">Закрыть</button>');
+ try{const detail=await esRpc('eschoolRead',{kind:'task',partId:t.remotePartId});if(editContext?.task?.id!==t.id||!$('editor').open)return;t.files=detail.files||[];$('remoteFiles').innerHTML=taskFilesHTML(t);if(!fileDownloading)$('remoteFileStatus').textContent=t.files.length?'Нажми файл, чтобы сохранить его на устройство.':'';}
+ catch(error){if(editContext?.task?.id===t.id&&$('remoteFileStatus'))$('remoteFileStatus').textContent='Не удалось обновить вложения: '+error.message;}
+}
+let fileDownloading=false;
+document.addEventListener('click',async event=>{
+ const button=event.target.closest('[data-download-task]');if(!button||fileDownloading)return;
+ const task=state.tasks.find(t=>t.id===button.dataset.downloadTask),file=task?.files?.find(f=>f.id===button.dataset.fileId);if(!file)return;
+ fileDownloading=true;button.disabled=true;let handle=null;
+ const status=message=>{if($('remoteFileStatus'))$('remoteFileStatus').textContent=message;else toast(message);};
+ try{
+  if(typeof window.showSaveFilePicker==='function'){status('Выбери место сохранения в окне браузера.');try{handle=await window.showSaveFilePicker({suggestedName:file.name});}catch(e){if(e.name==='AbortError')return;if(e.name!=='SecurityError'&&e.name!=='NotAllowedError')throw e;}}
+  let offset=0,total=0,parts=[],mime=file.mime;
+  do{status('Загружаем '+file.name+(total?' · '+Math.round(offset/total*100)+'%':'…'));const chunk=await esRpc('eschoolRead',{kind:'file',partId:task.remotePartId,fileId:file.id,offset});if(chunk.next<=offset)throw Error('Загрузка прервана. Попробуй ещё раз.');parts.push(Uint8Array.from(atob(chunk.base64),c=>c.charCodeAt(0)));offset=chunk.next;total=chunk.total;mime=chunk.mime;if(chunk.done)break;}while(offset<total);
+  const blob=new Blob(parts,{type:mime||'application/octet-stream'});
+  if(handle){const writer=await handle.createWritable();try{await writer.write(blob);await writer.close();}catch(e){await writer.abort().catch(()=>{});throw e;}status('Файл сохранён.');}
+  else{const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=file.name;a.target='_blank';a.rel='noopener';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),300000);status('Файл передан браузеру для сохранения.');if($('remoteFileStatus')){const link=document.createElement('a');link.href=url;link.download=file.name;link.textContent='Сохранить файл ещё раз';link.className='text-btn';$('remoteFileStatus').append(document.createElement('br'),link);}}
+ }catch(error){if(error.name!=='AbortError')status('Не удалось скачать: '+error.message);}
+ finally{fileDownloading=false;button.disabled=false;}
+});
+
+
+$('editForm').addEventListener('submit',e=>{if(editContext?.kind==='eschool'&&$('esUsername')){e.preventDefault();document.querySelector('[data-es="login"]')?.click();}});
+setInterval(()=>esScheduleWanted?esLoadSchedule():esAutoRefresh(),30000);
+setTimeout(()=>esAutoRefresh(),1200);
+window.addEventListener('online',()=>{esAuto.next=0;setTimeout(()=>esAutoRefresh(),1000);});
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){esAuto.blocked=false;setTimeout(()=>esAutoRefresh(),1000);}});
+</script>

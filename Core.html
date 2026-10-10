@@ -1,0 +1,29 @@
+<script>
+const Core = (() => {
+  const today = () => {const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;};
+  const schoolYear = date => Number(date.slice(0,4))-(Number(date.slice(5,7))<9?1:0);
+  const periodNames = type => type==='quarters'?['1 четверть','2 четверть','3 четверть','4 четверть']:type==='semesters'?['1 семестр','2 семестр']:type==='halves'?['1 полугодие','2 полугодие']:['Учебный год'];
+  function periodBounds(year,type,index){
+    if(!index||type==='year')return [`${year}-09-01`,`${year+1}-08-31`];
+    const ranges=type==='quarters'?[[`${year}-09-01`,`${year}-10-31`],[`${year}-11-01`,`${year}-12-31`],[`${year+1}-01-01`,`${year+1}-03-31`],[`${year+1}-04-01`,`${year+1}-08-31`]]:[[`${year}-09-01`,`${year}-12-31`],[`${year+1}-01-01`,`${year+1}-08-31`]];
+    return ranges[index-1]||periodBounds(year,type,0);
+  }
+  const inPeriod=(grade,year,type,index)=>{const [start,end]=periodBounds(year,type,index);return grade.date>=start&&grade.date<=end;};
+  function markValue(g,settings={}){const sign=settings.plusMinus?(g.modifier==='+'?1:g.modifier==='-'?-1:0):0;return Math.max(1,Math.min(5,g.value+sign*(settings.signValue??0.5)));}
+  function average(grades,settings={}){const included=grades.filter(g=>!g.excluded);const weight=included.reduce((s,g)=>s+g.weight,0);return weight?included.reduce((s,g)=>s+markValue(g,settings)*g.weight,0)/weight:null;}
+  function scenario(base,operations){
+    let result=base.map(g=>({...g,state:'original'}));
+    for(const op of operations){
+      if(op.kind==='add'){result.push({id:op.id,value:op.value,weight:op.weight,modifier:op.modifier||'',note:'Добавлено вручную',state:'added'});continue;}
+      const index=result.findIndex(g=>g.id===op.gradeId);if(index<0)continue;
+      if(op.kind==='exclude')result[index]={...result[index],excluded:true,state:'excluded'};
+      else result[index]={...result[index],value:op.value,weight:op.weight,modifier:op.modifier||'',excluded:false,state:'edited'};
+    }
+    return result;
+  }
+  const parseWeight=s=>{const text=String(s).trim().replace(',','.');return /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)?Number(text):NaN;};
+  const validWeight=w=>Number.isFinite(w)&&w>0&&w<=100;
+  function lessonDetails(lesson,state){return {grades:state.grades.filter(g=>g.lessonId===lesson.id),tasks:(state.tasks||[]).filter(t=>(lesson.taskIds||[]).includes(t.id)||t.lessonId===lesson.id)};}
+  return {lessonDetails,today,schoolYear,periodNames,periodBounds,inPeriod,markValue,average,scenario,parseWeight,validWeight};
+})();
+</script>

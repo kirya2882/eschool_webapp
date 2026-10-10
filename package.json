@@ -1,0 +1,9 @@
+{
+  "name": "eschool-webapp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Личный дневник и калькулятор оценок на Google Apps Script",
+  "scripts": {
+    "test": "node tests/test-startup.cjs && node tests/test-auto.cjs"
+  }
+}
